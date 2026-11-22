@@ -408,7 +408,7 @@ public class StreamService extends Service {
         PendingIntent open = PendingIntent.getActivity(this, 0,
                 new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, "stream")
-                .setContentTitle("TV to Sonos")
+                .setContentTitle("TV to WiFi Play")
                 .setContentText(text)
                 .setSmallIcon(android.R.drawable.ic_media_play)
                 .setContentIntent(open)

@@ -5,8 +5,11 @@ import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -30,6 +33,11 @@ public class MainActivity extends Activity {
     private static final int REQ_CAPTURE = 1;
     private static final int REQ_PERMS = 2;
 
+    // Button colours: bright amber = the one you're on, green = currently playing, grey = everything else.
+    private static final int FOCUS = Color.rgb(255, 179, 0);
+    private static final int PLAYING = Color.rgb(30, 110, 50);
+    private static final int IDLE = Color.rgb(50, 50, 50);
+
     private TextView statusView;
     private LinearLayout roomList;
     private final List<Button> roomButtons = new ArrayList<>();
@@ -43,7 +51,9 @@ public class MainActivity extends Activity {
             statusView.setText(StreamService.status);
             for (int i = 0; i < roomButtons.size() && i < rooms.size(); i++) {
                 boolean on = StreamService.running && rooms.get(i).ip.equals(StreamService.currentIp);
-                roomButtons.get(i).setText((on ? "▶  " : "") + rooms.get(i).name);
+                Button b = roomButtons.get(i);
+                b.setText((on ? "▶  " : "") + rooms.get(i).name);
+                if (!Boolean.valueOf(on).equals(b.getTag())) style(b, on);
             }
             ui.postDelayed(this, 1000);
         }
@@ -79,7 +89,7 @@ public class MainActivity extends Activity {
         root.setPadding(pad, dp(32), pad, dp(32));
 
         TextView title = new TextView(this);
-        title.setText("TV to Sonos");
+        title.setText("TV to WiFi Play");
         title.setTextColor(Color.WHITE);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 32);
@@ -107,6 +117,14 @@ public class MainActivity extends Activity {
         bar.addView(smallButton("Stop", v -> stopStreaming()));
         bar.addView(smallButton("Refresh", v -> findRooms()));
         root.addView(bar);
+
+        TextView credit = new TextView(this);
+        credit.setText("Made by Sandiv68");
+        credit.setTextColor(Color.rgb(120, 120, 120));
+        credit.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        credit.setGravity(Gravity.END);
+        credit.setPadding(0, dp(10), 0, 0);
+        root.addView(credit);
         return root;
     }
 
@@ -115,6 +133,7 @@ public class MainActivity extends Activity {
         b.setText(text);
         b.setAllCaps(false);
         b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        style(b, false);
         b.setOnClickListener(l);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
@@ -137,6 +156,7 @@ public class MainActivity extends Activity {
             b.setAllCaps(false);
             b.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
             b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+            style(b, false);
             b.setOnClickListener(v -> choose(r));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
@@ -239,6 +259,28 @@ public class MainActivity extends Activity {
             pending = null;
             choose(r);
         }
+    }
+
+    /** Grey normally, green while playing, bright amber with black text when selected by the remote. */
+    private void style(Button b, boolean playing) {
+        StateListDrawable bg = new StateListDrawable();
+        bg.addState(new int[]{android.R.attr.state_focused}, rounded(FOCUS));
+        bg.addState(new int[]{android.R.attr.state_pressed}, rounded(FOCUS));
+        bg.addState(new int[]{}, rounded(playing ? PLAYING : IDLE));
+        b.setBackground(bg);
+        b.setTextColor(new ColorStateList(
+                new int[][]{{android.R.attr.state_focused}, {android.R.attr.state_pressed}, {}},
+                new int[]{Color.BLACK, Color.BLACK, Color.WHITE}));
+        b.setStateListAnimator(null);
+        b.setPadding(dp(24), dp(14), dp(24), dp(14));
+        b.setTag(playing);
+    }
+
+    private GradientDrawable rounded(int color) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(color);
+        d.setCornerRadius(dp(10));
+        return d;
     }
 
     private int dp(int v) {

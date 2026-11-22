@@ -1,4 +1,4 @@
-# TV to Sonos
+# TV to WiFi Play
 
 One-screen Google TV app: pick a Sonos room and the TV's sound plays there over Wi-Fi.
 
@@ -12,7 +12,7 @@ automatically: open the repo's **Actions** tab → latest run → download **TvT
 3. Allow "Install unknown apps" for that app when asked.
 
 ## Use
-1. Open **TV to Sonos** → it lists the Sonos rooms on the Wi-Fi.
+1. Open **TV to WiFi Play** → it lists the Sonos rooms on the Wi-Fi.
 2. Pick the room → allow the audio permission and the "start recording/casting" prompt.
 3. Turn the TV's own volume down. Use the app's Vol −/+ (or the Sonos app) for Sonos volume.
 
