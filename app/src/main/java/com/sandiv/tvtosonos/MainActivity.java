@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
@@ -25,36 +26,37 @@ import android.widget.TextView;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
-/** One screen: a list of Sonos rooms. Tap one and the TV's sound goes there. */
+/** One screen: tick the Sonos rooms you want, press Play, and the TV's sound goes there. */
 public class MainActivity extends Activity {
 
     private static final int REQ_CAPTURE = 1;
     private static final int REQ_PERMS = 2;
 
-    // Button colours: bright amber = the one you're on, green = currently playing, grey = everything else.
+    // Button colours: bright amber = the one the remote is on, green = playing, grey = everything else.
     private static final int FOCUS = Color.rgb(255, 179, 0);
     private static final int PLAYING = Color.rgb(30, 110, 50);
     private static final int IDLE = Color.rgb(50, 50, 50);
+
+    private static final int MIN_SCALE = 70, MAX_SCALE = 130, STEP = 10;
 
     private TextView statusView;
     private LinearLayout roomList;
     private final List<Button> roomButtons = new ArrayList<>();
     private List<Sonos.Room> rooms = new ArrayList<>();
-    private Sonos.Room pending;
+    private final Set<String> ticked = new LinkedHashSet<>(); // room IPs, in the order they were ticked
+    private boolean pendingPlay;
+    private int scale = 100; // text size %, saved between uses
     private final Handler ui = new Handler(Looper.getMainLooper());
 
     private final Runnable refreshStatus = new Runnable() {
         @Override
         public void run() {
             statusView.setText(StreamService.status);
-            for (int i = 0; i < roomButtons.size() && i < rooms.size(); i++) {
-                boolean on = StreamService.running && rooms.get(i).ip.equals(StreamService.currentIp);
-                Button b = roomButtons.get(i);
-                b.setText((on ? "▶  " : "") + rooms.get(i).name);
-                if (!Boolean.valueOf(on).equals(b.getTag())) style(b, on);
-            }
+            updateRoomButtons();
             ui.postDelayed(this, 1000);
         }
     };
@@ -62,6 +64,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        scale = prefs().getInt("scale", 100);
+        if (StreamService.running) ticked.addAll(StreamService.playingIps);
         setContentView(buildLayout());
         askPermissions();
         findRooms();
@@ -79,65 +83,78 @@ public class MainActivity extends Activity {
         ui.removeCallbacks(refreshStatus);
     }
 
+    private SharedPreferences prefs() {
+        return getSharedPreferences("settings", MODE_PRIVATE);
+    }
+
     // ---------- Layout ----------
 
     private View buildLayout() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.rgb(20, 20, 20));
-        int pad = dp(48);
-        root.setPadding(pad, dp(32), pad, dp(32));
+        root.setPadding(dp(48), dp(28), dp(48), dp(24));
 
         TextView title = new TextView(this);
         title.setText("TV to WiFi Play");
         title.setTextColor(Color.WHITE);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 32);
+        text(title, 32);
         root.addView(title);
 
         statusView = new TextView(this);
         statusView.setTextColor(Color.rgb(170, 170, 170));
-        statusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
-        statusView.setPadding(0, dp(8), 0, dp(20));
+        text(statusView, 18);
+        statusView.setPadding(0, dp(6), 0, dp(16));
+        statusView.setText(StreamService.status);
         root.addView(statusView);
 
         ScrollView scroll = new ScrollView(this);
         roomList = new LinearLayout(this);
         roomList.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(roomList);
-        root.addView(scroll, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        root.addView(scroll, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setGravity(Gravity.START);
-        bar.setPadding(0, dp(16), 0, 0);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(0, dp(14), 0, 0);
+        bar.addView(smallButton("▶ Play", v -> play()));
+        bar.addView(smallButton("Stop", v -> stopStreaming()));
         bar.addView(smallButton("Vol −", v -> volume(-4)));
         bar.addView(smallButton("Vol +", v -> volume(+4)));
-        bar.addView(smallButton("Stop", v -> stopStreaming()));
         bar.addView(smallButton("Refresh", v -> findRooms()));
+        bar.addView(smallButton("A−", v -> changeScale(-STEP)));
+        TextView pct = new TextView(this);
+        pct.setText(scale + "%");
+        pct.setTextColor(Color.rgb(170, 170, 170));
+        text(pct, 16);
+        pct.setPadding(0, 0, dp(12), 0);
+        bar.addView(pct);
+        bar.addView(smallButton("A+", v -> changeScale(+STEP)));
         root.addView(bar);
 
         TextView credit = new TextView(this);
         credit.setText("Made by Sandiv68");
         credit.setTextColor(Color.rgb(120, 120, 120));
-        credit.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        text(credit, 12);
         credit.setGravity(Gravity.END);
-        credit.setPadding(0, dp(10), 0, 0);
+        credit.setPadding(0, dp(8), 0, 0);
         root.addView(credit);
         return root;
     }
 
-    private Button smallButton(String text, View.OnClickListener l) {
+    private Button smallButton(String label, View.OnClickListener l) {
         Button b = new Button(this);
-        b.setText(text);
+        b.setText(label);
+        b.setTag(R.id.label_tag, label);
         b.setAllCaps(false);
-        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        text(b, 18);
         style(b, false);
         b.setOnClickListener(l);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        lp.setMarginEnd(dp(12));
+        lp.setMarginEnd(dp(10));
         b.setLayoutParams(lp);
         return b;
     }
@@ -148,51 +165,84 @@ public class MainActivity extends Activity {
         roomButtons.clear();
         if (found.isEmpty()) {
             StreamService.status = "No Sonos found. Is the Google TV on the same Wi-Fi as the speakers?";
+            statusView.setText(StreamService.status);
             return;
         }
         for (Sonos.Room r : found) {
             Button b = new Button(this);
-            b.setText(r.name);
             b.setAllCaps(false);
             b.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+            text(b, 22);
             style(b, false);
-            b.setOnClickListener(v -> choose(r));
+            b.setOnClickListener(v -> toggle(r));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
             lp.bottomMargin = dp(8);
             roomList.addView(b, lp);
             roomButtons.add(b);
         }
-        roomButtons.get(0).requestFocus();
-        if (!StreamService.running) StreamService.status = "Pick a room";
+        updateRoomButtons();
+        if (getCurrentFocus() == null) roomButtons.get(0).requestFocus();
+        if (!StreamService.running) {
+            StreamService.status = "Tick the rooms you want, then press Play";
+            statusView.setText(StreamService.status);
+        }
+    }
+
+    /** ☑/☐ shows what's ticked; green background shows what's actually playing. */
+    private void updateRoomButtons() {
+        Set<String> playing = StreamService.running ? StreamService.playingIps : java.util.Collections.emptySet();
+        for (int i = 0; i < roomButtons.size() && i < rooms.size(); i++) {
+            Sonos.Room r = rooms.get(i);
+            Button b = roomButtons.get(i);
+            boolean on = playing.contains(r.ip);
+            b.setText((ticked.contains(r.ip) ? "☑  " : "☐  ") + r.name + (on ? "   ▶ playing" : ""));
+            if (!Boolean.valueOf(on).equals(b.getTag())) style(b, on);
+        }
     }
 
     // ---------- Actions ----------
 
     private void findRooms() {
-        if (!StreamService.running) StreamService.status = "Looking for Sonos speakers…";
-        statusView.setText(StreamService.status);
+        if (!StreamService.running) {
+            StreamService.status = "Looking for Sonos speakers…";
+            statusView.setText(StreamService.status);
+        }
         new Thread(() -> {
             List<Sonos.Room> found = Sonos.discover(this);
             ui.post(() -> showRooms(found));
         }).start();
     }
 
-    private void choose(Sonos.Room room) {
+    private void toggle(Sonos.Room r) {
+        if (!ticked.remove(r.ip)) ticked.add(r.ip);
+        updateRoomButtons();
+        if (StreamService.running) {
+            StreamService.status = "Press Play to update the rooms";
+            statusView.setText(StreamService.status);
+        }
+    }
+
+    private void play() {
+        List<Sonos.Room> chosen = chosenRooms();
+        if (chosen.isEmpty()) {
+            if (StreamService.running) {
+                stopStreaming();
+            } else {
+                StreamService.status = "Tick at least one room first";
+                statusView.setText(StreamService.status);
+            }
+            return;
+        }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            pending = room;
+            pendingPlay = true;
             askPermissions();
             return;
         }
         if (StreamService.running) {
-            startService(new Intent(this, StreamService.class)
-                    .setAction(StreamService.ACTION_SWITCH)
-                    .putExtra(StreamService.EXTRA_IP, room.ip)
-                    .putExtra(StreamService.EXTRA_NAME, room.name));
+            startService(withRooms(new Intent(this, StreamService.class).setAction(StreamService.ACTION_SET), chosen));
             return;
         }
-        pending = room;
         MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
         try {
             startActivityForResult(mpm.createScreenCaptureIntent(), REQ_CAPTURE);
@@ -201,21 +251,42 @@ public class MainActivity extends Activity {
         }
     }
 
+    private List<Sonos.Room> chosenRooms() {
+        List<Sonos.Room> out = new ArrayList<>();
+        for (String ip : ticked) {
+            for (Sonos.Room r : rooms) {
+                if (r.ip.equals(ip)) out.add(r);
+            }
+        }
+        return out;
+    }
+
+    private static Intent withRooms(Intent i, List<Sonos.Room> chosen) {
+        ArrayList<String> ips = new ArrayList<>(), uuids = new ArrayList<>(), names = new ArrayList<>();
+        for (Sonos.Room r : chosen) {
+            ips.add(r.ip);
+            uuids.add(r.uuid);
+            names.add(r.name);
+        }
+        return i.putStringArrayListExtra(StreamService.EXTRA_IPS, ips)
+                .putStringArrayListExtra(StreamService.EXTRA_UUIDS, uuids)
+                .putStringArrayListExtra(StreamService.EXTRA_NAMES, names);
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != REQ_CAPTURE || pending == null) return;
+        if (requestCode != REQ_CAPTURE) return;
+        List<Sonos.Room> chosen = chosenRooms();
         if (resultCode != RESULT_OK || data == null) {
-            StreamService.status = "Permission refused. Pick the room again and choose Start/Allow.";
+            StreamService.status = "Permission refused. Press Play again and choose Start/Allow.";
             return;
         }
-        startForegroundService(new Intent(this, StreamService.class)
+        if (chosen.isEmpty()) return;
+        startForegroundService(withRooms(new Intent(this, StreamService.class)
                 .setAction(StreamService.ACTION_START)
                 .putExtra(StreamService.EXTRA_CODE, resultCode)
-                .putExtra(StreamService.EXTRA_DATA, data)
-                .putExtra(StreamService.EXTRA_IP, pending.ip)
-                .putExtra(StreamService.EXTRA_NAME, pending.name));
-        pending = null;
+                .putExtra(StreamService.EXTRA_DATA, data), chosen));
     }
 
     private void stopStreaming() {
@@ -233,6 +304,31 @@ public class MainActivity extends Activity {
             } catch (IOException ignored) {
             }
         }).start();
+    }
+
+    /** A− / A+: text size between 70% and 130%, remembered for next time. */
+    private void changeScale(int delta) {
+        int next = Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale + delta));
+        if (next == scale) return;
+        scale = next;
+        prefs().edit().putInt("scale", scale).apply();
+        String focusLabel = delta < 0 ? "A−" : "A+";
+        setContentView(buildLayout());
+        showRooms(rooms);
+        View again = findButton(getWindow().getDecorView(), focusLabel);
+        if (again != null) again.requestFocus();
+    }
+
+    private View findButton(View v, String label) {
+        if (v instanceof Button && label.equals(v.getTag(R.id.label_tag))) return v;
+        if (v instanceof android.view.ViewGroup) {
+            android.view.ViewGroup g = (android.view.ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                View f = findButton(g.getChildAt(i), label);
+                if (f != null) return f;
+            }
+        }
+        return null;
     }
 
     // ---------- Permissions ----------
@@ -254,14 +350,15 @@ public class MainActivity extends Activity {
         super.onRequestPermissionsResult(requestCode, permissions, results);
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             StreamService.status = "Error: the app needs the audio permission to send sound to Sonos";
-        } else if (pending != null) {
-            Sonos.Room r = pending;
-            pending = null;
-            choose(r);
+        } else if (pendingPlay) {
+            pendingPlay = false;
+            play();
         }
     }
 
-    /** Grey normally, green while playing, bright amber with black text when selected by the remote. */
+    // ---------- Looks ----------
+
+    /** Grey normally, green while playing, bright amber with black text when the remote is on it. */
     private void style(Button b, boolean playing) {
         StateListDrawable bg = new StateListDrawable();
         bg.addState(new int[]{android.R.attr.state_focused}, rounded(FOCUS));
@@ -272,7 +369,9 @@ public class MainActivity extends Activity {
                 new int[][]{{android.R.attr.state_focused}, {android.R.attr.state_pressed}, {}},
                 new int[]{Color.BLACK, Color.BLACK, Color.WHITE}));
         b.setStateListAnimator(null);
-        b.setPadding(dp(24), dp(14), dp(24), dp(14));
+        b.setMinHeight(0);
+        b.setMinimumHeight(0);
+        b.setPadding(dp(20), dp(12), dp(20), dp(12));
         b.setTag(playing);
     }
 
@@ -283,7 +382,13 @@ public class MainActivity extends Activity {
         return d;
     }
 
+    /** Sets text size scaled by the A−/A+ setting. */
+    private void text(TextView v, float sp) {
+        v.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp * scale / 100f);
+    }
+
+    /** dp, also scaled so padding shrinks/grows with the text. */
     private int dp(int v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
+        return Math.round(v * scale / 100f * getResources().getDisplayMetrics().density);
     }
 }

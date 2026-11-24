@@ -39,15 +39,18 @@ public final class Sonos {
     public static final class Room {
         public final String name;
         public final String ip;   // IP of the room's coordinator (the speaker that takes commands)
+        public final String uuid; // Sonos ID, e.g. RINCON_000E58...
 
-        Room(String name, String ip) {
+        Room(String name, String ip, String uuid) {
             this.name = name;
             this.ip = ip;
+            this.uuid = uuid;
         }
     }
 
     private static final String AVT = "urn:schemas-upnp-org:service:AVTransport:1";
     private static final String RC = "urn:schemas-upnp-org:service:RenderingControl:1";
+    private static final String GRC = "urn:schemas-upnp-org:service:GroupRenderingControl:1";
     private static final String ZGT = "urn:schemas-upnp-org:service:ZoneGroupTopology:1";
 
     private Sonos() {}
@@ -70,7 +73,9 @@ public final class Sonos {
             try {
                 String d = httpGet("http://" + ip + ":1400/xml/device_description.xml");
                 String n = tag(d, "roomName");
-                if (n != null && !byName.containsKey(n)) byName.put(n, new Room(unescape(n), ip));
+                String udn = tag(d, "UDN");
+                String id = udn == null ? "" : udn.replace("uuid:", "").trim();
+                if (n != null && !byName.containsKey(n)) byName.put(n, new Room(unescape(n), ip, id));
             } catch (Exception ignored) {
             }
         }
@@ -151,7 +156,7 @@ public final class Sonos {
             if (coordIp == null || coordName == null) continue;
             others.remove(coordName);
             String label = others.isEmpty() ? coordName : coordName + " + " + String.join(" + ", others);
-            rooms.add(new Room(label, coordIp));
+            rooms.add(new Room(label, coordIp, coordinator));
         }
         rooms.sort((a, b) -> a.name.compareToIgnoreCase(b.name));
         return rooms;
@@ -193,9 +198,31 @@ public final class Sonos {
         }
     }
 
+    /** Makes a speaker follow another room's playback (Sonos grouping, kept in sync by Sonos). */
+    public static void join(String memberIp, String leadUuid) throws IOException {
+        soap(memberIp, "/MediaRenderer/AVTransport/Control", AVT, "SetAVTransportURI",
+                "<InstanceID>0</InstanceID><CurrentURI>x-rincon:" + leadUuid + "</CurrentURI>"
+                        + "<CurrentURIMetaData></CurrentURIMetaData>");
+    }
+
+    /** Takes a speaker out of whatever group it's in. */
+    public static void leave(String ip) {
+        try {
+            soap(ip, "/MediaRenderer/AVTransport/Control", AVT, "BecomeCoordinatorOfStandaloneGroup",
+                    "<InstanceID>0</InstanceID>");
+        } catch (IOException ignored) {
+        }
+    }
+
+    /** Changes the volume of the whole group (all rooms together); falls back to one speaker. */
     public static void changeVolume(String ip, int delta) throws IOException {
-        soap(ip, "/MediaRenderer/RenderingControl/Control", RC, "SetRelativeVolume",
-                "<InstanceID>0</InstanceID><Channel>Master</Channel><Adjustment>" + delta + "</Adjustment>");
+        try {
+            soap(ip, "/MediaRenderer/GroupRenderingControl/Control", GRC, "SetRelativeGroupVolume",
+                    "<InstanceID>0</InstanceID><Adjustment>" + delta + "</Adjustment>");
+        } catch (IOException e) {
+            soap(ip, "/MediaRenderer/RenderingControl/Control", RC, "SetRelativeVolume",
+                    "<InstanceID>0</InstanceID><Channel>Master</Channel><Adjustment>" + delta + "</Adjustment>");
+        }
     }
 
     /** The TV's own IP address on the network that can reach this speaker. */

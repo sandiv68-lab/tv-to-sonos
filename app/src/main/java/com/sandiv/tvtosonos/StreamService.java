@@ -32,7 +32,14 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
@@ -45,17 +52,19 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class StreamService extends Service {
 
     public static final String ACTION_START = "start";
-    public static final String ACTION_SWITCH = "switch";
+    public static final String ACTION_SET = "set";     // change which rooms are playing
     public static final String ACTION_STOP = "stop";
     public static final String EXTRA_CODE = "code";
     public static final String EXTRA_DATA = "data";
-    public static final String EXTRA_IP = "ip";
-    public static final String EXTRA_NAME = "name";
+    public static final String EXTRA_IPS = "ips";
+    public static final String EXTRA_NAMES = "names";
+    public static final String EXTRA_UUIDS = "uuids";
 
     // Read by the screen to show what's happening.
     public static volatile String status = "Pick a room";
     public static volatile boolean running = false;
-    public static volatile String currentIp = null;
+    public static volatile String currentIp = null;               // the group's lead speaker
+    public static volatile Set<String> playingIps = Collections.emptySet();
 
     private static final int RATE = 44100;
 
@@ -69,6 +78,10 @@ public class StreamService extends Service {
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
     private final Object sonosLock = new Object();
+    // Rooms playing right now, lead speaker first. ip -> {uuid, name}
+    private final LinkedHashMap<String, String[]> group = new LinkedHashMap<>();
+    private String workingUriStyle = null;
+    private volatile List<String> groupOrder = Collections.emptyList(); // snapshot of group, lead first
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -83,11 +96,17 @@ public class StreamService extends Service {
             return START_NOT_STICKY;
         }
 
-        String ip = intent.getStringExtra(EXTRA_IP);
-        String name = intent.getStringExtra(EXTRA_NAME);
+        ArrayList<String> ips = intent.getStringArrayListExtra(EXTRA_IPS);
+        ArrayList<String> uuids = intent.getStringArrayListExtra(EXTRA_UUIDS);
+        ArrayList<String> names = intent.getStringArrayListExtra(EXTRA_NAMES);
+        if (ips == null || ips.isEmpty()) {
+            shutdown();
+            return START_NOT_STICKY;
+        }
+        String name = names.get(0);
 
-        if (ACTION_SWITCH.equals(action) && active) {
-            new Thread(() -> connectSonos(ip, name)).start();
+        if (ACTION_SET.equals(action)) {
+            if (active) new Thread(() -> applyRooms(ips, uuids, names)).start();
             return START_NOT_STICKY;
         }
 
@@ -133,54 +152,125 @@ public class StreamService extends Service {
         }
         captureThread = new Thread(this::captureLoop, "capture");
         captureThread.start();
-        new Thread(() -> connectSonos(ip, name)).start();
+        new Thread(() -> applyRooms(ips, uuids, names)).start();
         return START_NOT_STICKY;
+    }
+
+    /** Makes the playing rooms match the ticked list: removes unticked rooms, adds new ones. */
+    private void applyRooms(List<String> ips, List<String> uuids, List<String> names) {
+        synchronized (sonosLock) {
+            List<String> current = new ArrayList<>(group.keySet());
+            Collections.reverse(current); // remove followers before the lead
+            for (String ip : current) {
+                if (!ips.contains(ip)) removeRoom(ip);
+            }
+            for (int i = 0; i < ips.size(); i++) {
+                if (!active) return;
+                addRoom(ips.get(i), uuids.get(i), names.get(i));
+            }
+        }
     }
 
     // ---------- Sonos ----------
 
-    private void connectSonos(String ip, String name) {
+    /** Adds a room. The first room plays the stream; later rooms join its Sonos group so they stay in sync. */
+    private void addRoom(String ip, String uuid, String name) {
         synchronized (sonosLock) {
-            if (currentIp != null && !currentIp.equals(ip)) Sonos.stop(currentIp);
-            currentIp = ip;
-            setStatus("Connecting to " + name + "…");
-            String tvIp;
-            try {
-                tvIp = Sonos.localIpFor(ip);
-            } catch (IOException e) {
-                setStatus("Can't reach " + name + " on this Wi-Fi");
+            if (!active || group.containsKey(ip)) return;
+            if (group.isEmpty()) {
+                if (startLead(ip, name)) {
+                    group.put(ip, new String[]{uuid, name});
+                    publish();
+                }
                 return;
             }
-            String hostPath = tvIp + ":" + port + "/tv.aac";
-            // Sonos accepts live streams in a few URL styles; try each until one plays.
-            String[] uris = {
-                    "x-rincon-mp3radio://" + hostPath,
-                    "aac://http://" + hostPath,
-                    "http://" + hostPath
-            };
-            String lastError = "";
-            for (String uri : uris) {
-                if (!active || !ip.equals(currentIp)) return;
-                int before = streamRequests.get();
-                try {
-                    Sonos.play(ip, uri);
-                } catch (IOException e) {
-                    lastError = e.getMessage();
-                    continue;
-                }
-                for (int i = 0; i < 8; i++) {
-                    sleep(1000);
-                    String st = Sonos.state(ip);
-                    if ("PLAYING".equals(st) && streamRequests.get() > before) {
-                        setStatus("Playing on " + name);
-                        return;
-                    }
-                    if ("STOPPED".equals(st) && i >= 3) break;
-                }
-                Sonos.stop(ip);
+            String leadUuid = group.values().iterator().next()[0];
+            setStatus("Adding " + name + "…");
+            try {
+                Sonos.join(ip, leadUuid);
+                group.put(ip, new String[]{uuid, name});
+            } catch (IOException e) {
+                setStatus("Couldn't add " + name + " (" + e.getMessage() + ")");
+                sleep(2500);
             }
-            setStatus("Sonos wouldn't play the stream " + lastError);
+            publish();
         }
+    }
+
+    /** Removes a room. If it was the lead speaker, the next room takes over. */
+    private void removeRoom(String ip) {
+        synchronized (sonosLock) {
+            if (!group.containsKey(ip)) return;
+            String lead = group.keySet().iterator().next();
+            if (!ip.equals(lead)) {
+                Sonos.leave(ip);
+                group.remove(ip);
+                publish();
+                return;
+            }
+            // Lead removed: rebuild the group around the next room.
+            LinkedHashMap<String, String[]> rest = new LinkedHashMap<>(group);
+            rest.remove(ip);
+            for (String m : rest.keySet()) Sonos.leave(m);
+            Sonos.stop(ip);
+            group.clear();
+            publish();
+            for (Map.Entry<String, String[]> e : rest.entrySet()) {
+                addRoom(e.getKey(), e.getValue()[0], e.getValue()[1]);
+            }
+        }
+    }
+
+    /** Starts the stream on one speaker, trying the URL styles Sonos accepts for live audio. */
+    private boolean startLead(String ip, String name) {
+        setStatus("Connecting to " + name + "…");
+        String tvIp;
+        try {
+            tvIp = Sonos.localIpFor(ip);
+        } catch (IOException e) {
+            setStatus("Can't reach " + name + " on this Wi-Fi");
+            return false;
+        }
+        String hostPath = tvIp + ":" + port + "/tv.aac";
+        List<String> styles = new ArrayList<>(Arrays.asList("x-rincon-mp3radio://", "aac://http://", "http://"));
+        if (workingUriStyle != null) {
+            styles.remove(workingUriStyle);
+            styles.add(0, workingUriStyle);
+        }
+        String lastError = "";
+        for (String style : styles) {
+            if (!active) return false;
+            int before = streamRequests.get();
+            try {
+                Sonos.play(ip, style + hostPath);
+            } catch (IOException e) {
+                lastError = e.getMessage();
+                continue;
+            }
+            for (int i = 0; i < 8; i++) {
+                sleep(1000);
+                String st = Sonos.state(ip);
+                if ("PLAYING".equals(st) && streamRequests.get() > before) {
+                    workingUriStyle = style;
+                    return true;
+                }
+                if ("STOPPED".equals(st) && i >= 3) break;
+            }
+            Sonos.stop(ip);
+        }
+        setStatus("Sonos wouldn't play the stream " + lastError);
+        return false;
+    }
+
+    /** Shares the current rooms with the screen and the notification. */
+    private void publish() {
+        groupOrder = new ArrayList<>(group.keySet());
+        playingIps = new HashSet<>(group.keySet());
+        currentIp = group.isEmpty() ? null : group.keySet().iterator().next();
+        if (group.isEmpty()) return;
+        List<String> names = new ArrayList<>();
+        for (String[] v : group.values()) names.add(v[1]);
+        setStatus("Playing on " + String.join(" + ", names));
     }
 
     // ---------- Audio capture + AAC encoding ----------
@@ -369,9 +459,15 @@ public class StreamService extends Service {
         boolean wasActive = active;
         active = false;
         running = false;
-        String ip = currentIp;
+        List<String> ips = groupOrder;
         currentIp = null;
-        if (wasActive && ip != null) new Thread(() -> Sonos.stop(ip)).start();
+        playingIps = Collections.emptySet();
+        if (wasActive && !ips.isEmpty()) {
+            new Thread(() -> {
+                Sonos.stop(ips.get(0));
+                for (int i = 1; i < ips.size(); i++) Sonos.leave(ips.get(i)); // put the villa's rooms back as they were
+            }).start();
+        }
         try { if (server != null) server.close(); } catch (IOException ignored) { }
         for (Client c : clients) {
             try { c.socket.close(); } catch (IOException ignored) { }
