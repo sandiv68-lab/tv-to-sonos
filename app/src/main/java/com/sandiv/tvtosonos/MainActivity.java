@@ -20,6 +20,7 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -64,7 +65,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        scale = prefs().getInt("scale", 100);
+        scale = prefs().getInt("scale", 90);
         if (StreamService.running) ticked.addAll(StreamService.playingIps);
         setContentView(buildLayout());
         askPermissions();
@@ -95,16 +96,32 @@ public class MainActivity extends Activity {
         root.setBackgroundColor(Color.rgb(20, 20, 20));
         root.setPadding(dp(48), dp(28), dp(48), dp(24));
 
+        // Top row: title on the left, text size A− 100% A+ on the right.
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
         TextView title = new TextView(this);
         title.setText("TV to WiFi Play");
         title.setTextColor(Color.WHITE);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        text(title, 32);
-        root.addView(title);
+        title.setSingleLine(true);
+        text(title, 28);
+        top.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        top.addView(smallButton("A−", v -> changeScale(-STEP)));
+        TextView pct = new TextView(this);
+        pct.setText(scale + "%");
+        pct.setTextColor(Color.rgb(170, 170, 170));
+        text(pct, 15);
+        pct.setPadding(0, 0, dp(10), 0);
+        top.addView(pct);
+        Button plus = smallButton("A+", v -> changeScale(+STEP));
+        ((LinearLayout.LayoutParams) plus.getLayoutParams()).setMarginEnd(0);
+        top.addView(plus);
+        root.addView(top);
 
         statusView = new TextView(this);
         statusView.setTextColor(Color.rgb(170, 170, 170));
-        text(statusView, 18);
+        text(statusView, 16);
         statusView.setPadding(0, dp(6), 0, dp(16));
         statusView.setText(StreamService.status);
         root.addView(statusView);
@@ -124,15 +141,10 @@ public class MainActivity extends Activity {
         bar.addView(smallButton("Vol −", v -> volume(-4)));
         bar.addView(smallButton("Vol +", v -> volume(+4)));
         bar.addView(smallButton("Refresh", v -> findRooms()));
-        bar.addView(smallButton("A−", v -> changeScale(-STEP)));
-        TextView pct = new TextView(this);
-        pct.setText(scale + "%");
-        pct.setTextColor(Color.rgb(170, 170, 170));
-        text(pct, 16);
-        pct.setPadding(0, 0, dp(12), 0);
-        bar.addView(pct);
-        bar.addView(smallButton("A+", v -> changeScale(+STEP)));
-        root.addView(bar);
+        HorizontalScrollView barScroll = new HorizontalScrollView(this); // scrolls sideways if it doesn't fit
+        barScroll.setHorizontalScrollBarEnabled(false);
+        barScroll.addView(bar);
+        root.addView(barScroll);
 
         TextView credit = new TextView(this);
         credit.setText("Made by Sandiv68");
@@ -149,7 +161,7 @@ public class MainActivity extends Activity {
         b.setText(label);
         b.setTag(R.id.label_tag, label);
         b.setAllCaps(false);
-        text(b, 18);
+        text(b, 16);
         style(b, false);
         b.setOnClickListener(l);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -172,7 +184,7 @@ public class MainActivity extends Activity {
             Button b = new Button(this);
             b.setAllCaps(false);
             b.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-            text(b, 22);
+            text(b, 20);
             style(b, false);
             b.setOnClickListener(v -> toggle(r));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -384,7 +396,8 @@ public class MainActivity extends Activity {
 
     /** Sets text size scaled by the A−/A+ setting. */
     private void text(TextView v, float sp) {
-        v.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp * scale / 100f);
+        // DIP, not SP: the system's big-font setting doesn't blow up the layout; A−/A+ controls size instead.
+        v.setTextSize(TypedValue.COMPLEX_UNIT_DIP, sp * scale / 100f);
     }
 
     /** dp, also scaled so padding shrinks/grows with the text. */
